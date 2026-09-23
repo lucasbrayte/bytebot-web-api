@@ -1,0 +1,16 @@
+{
+  "name": "bytebot-web-api",
+  "version": "1.0.0",
+  "description": "Discord OAuth + ByteBot voice integration API",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-session": "^1.7.0"
+  }
+}
