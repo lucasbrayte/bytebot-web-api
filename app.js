@@ -51,8 +51,12 @@ app.get('/api/info', (req, res) => {
 });
 
 // Rota Principal: Serve o ficheiro index.html do frontend
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'frontend', 'out', 'index.html'));
+app.get('*', (req, res) => {
+  // Se a requisição for para uma rota de API que não existe, responde com 404 em JSON
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'API route not found' });
+  }
+res.sendFile(path.join(__dirname, 'frontend', 'out', 'index.html'));
 });
 
 function buildDiscordAuthUrl(state) {
