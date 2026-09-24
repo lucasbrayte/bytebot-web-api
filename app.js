@@ -4,6 +4,7 @@ const express = require('express');
 const session = require('express-session');
 const axios = require('axios');
 const crypto = require('crypto');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,6 +32,7 @@ app.use(
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'frontend')));
 
 app.get('/', (req, res) => {
   res.json({
@@ -42,6 +44,10 @@ app.get('/', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ ok: true });
+});
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'frontend', 'page.js'));
 });
 
 function buildDiscordAuthUrl(state) {
