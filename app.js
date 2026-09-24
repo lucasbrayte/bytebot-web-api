@@ -36,28 +36,9 @@ app.use(express.urlencoded({ extended: true }));
 // Serve arquivos estáticos da pasta frontend (CSS, JS, imagens)
 app.use(express.static(path.join(__dirname, 'frontend', 'out')));
 
-// Rota de Health Check
-app.get('/health', (req, res) => {
-  res.json({ ok: true });
-});
-
-// Rota com dados da API (movida para /api/info para libertar a rota principal '/')
-app.get('/api/info', (req, res) => {
-  res.json({
-    name: 'ByteBot Web API',
-    status: 'ok',
-    routes: ['/api/auth/discord', '/api/auth/callback', '/api/voice/status'],
-  });
-});
-
-// Rota Principal: Serve o ficheiro index.html do frontend
-app.get('*', (req, res) => {
-  // Se a requisição for para uma rota de API que não existe, responde com 404 em JSON
-  if (req.path.startsWith('/api')) {
-    return res.status(404).json({ error: 'API route not found' });
-  }
-res.sendFile(path.join(__dirname, 'frontend', 'out', 'index.html'));
-});
+// ==========================================
+// UTILS E FUNÇÕES DE APOIO
+// ==========================================
 
 function buildDiscordAuthUrl(state) {
   const params = new URLSearchParams({
@@ -168,6 +149,24 @@ async function requireVoiceGuild(req, res) {
   return guildId;
 }
 
+// ==========================================
+// ROTAS DE API
+// ==========================================
+
+// Rota de Health Check
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
+});
+
+// Rota com dados da API
+app.get('/api/info', (req, res) => {
+  res.json({
+    name: 'ByteBot Web API',
+    status: 'ok',
+    routes: ['/api/auth/discord', '/api/auth/callback', '/api/voice/status'],
+  });
+});
+
 app.get('/api/auth/discord', (req, res) => {
   const state = crypto.randomBytes(24).toString('hex');
   req.session.oauthState = state;
@@ -203,7 +202,6 @@ app.get('/api/auth/callback', async (req, res) => {
       email: user.email,
     };
 
-    // Redireciona usando a variável de ambiente dinamicamente para evitar ficar preso no localhost
     const redirectUrl = process.env.FRONTEND_REDIRECT_URL || '/';
     return res.redirect(redirectUrl);
   } catch (error) {
@@ -242,7 +240,6 @@ app.get('/api/voice/status', async (req, res) => {
   }
 });
 
-// Endpoint para consultar o estado atual da música (progresso, capa, estado)
 app.get('/api/player/state', async (req, res) => {
   const userId = requireAuthenticatedUser(req, res);
   if (!userId) return;
@@ -278,7 +275,6 @@ app.get('/api/player/search', async (req, res) => {
   }
 });
 
-// Endpoint Play modificado para permitir retomada (sem obrigar query)
 app.post('/api/player/play', async (req, res) => {
   const userId = requireAuthenticatedUser(req, res);
   if (!userId) return;
@@ -379,6 +375,23 @@ app.post('/api/player/volume', async (req, res) => {
   }
 });
 
+// ==========================================
+// ROTA CATCH-ALL DO FRONTEND (DEVE SER A ÚLTIMA!)
+// ==========================================
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'API route not found' });
+  }
+  res.sendFile(path.join(__dirname, 'frontend', 'out', 'index.html'));
+});
+
 app.listen(PORT, () => {
   console.log(`ByteBot Web API running on http://localhost:${PORT}`);
 });
+
+app.listen(PORT, () => {
+  console.log(`ByteBot Web API running on http://localhost:${PORT}`);
+});
+
+// ADICIONE ESTA LINHA PARA A VERCEL:
+module.exports = app;
