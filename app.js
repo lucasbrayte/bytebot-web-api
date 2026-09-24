@@ -32,9 +32,17 @@ app.use(
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'frontend')));
 
-app.get('/', (req, res) => {
+// Serve arquivos estáticos da pasta frontend (CSS, JS, imagens)
+app.use(express.static(path.join(__dirname, 'frontend', 'out')));
+
+// Rota de Health Check
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
+});
+
+// Rota com dados da API (movida para /api/info para libertar a rota principal '/')
+app.get('/api/info', (req, res) => {
   res.json({
     name: 'ByteBot Web API',
     status: 'ok',
@@ -42,12 +50,9 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {
-  res.json({ ok: true });
-});
-
+// Rota Principal: Serve o ficheiro index.html do frontend
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'frontend', 'page.js'));
+  res.sendFile(path.join(__dirname, 'frontend', 'out', 'index.html'));
 });
 
 function buildDiscordAuthUrl(state) {
@@ -194,7 +199,9 @@ app.get('/api/auth/callback', async (req, res) => {
       email: user.email,
     };
 
-    return res.redirect('http://localhost:3002');
+    // Redireciona usando a variável de ambiente dinamicamente para evitar ficar preso no localhost
+    const redirectUrl = process.env.FRONTEND_REDIRECT_URL || '/';
+    return res.redirect(redirectUrl);
   } catch (error) {
     console.error('Discord OAuth callback failed:', error.response?.data || error.message);
     return res.status(500).json({ error: 'Failed to authenticate with Discord.' });
