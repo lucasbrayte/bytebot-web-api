@@ -23,10 +23,10 @@ Copie o arquivo `.env.example` para `.env` e preencha os valores reais:
 ```
 DISCORD_CLIENT_ID=
 DISCORD_CLIENT_SECRET=
-REDIRECT_URI=http://localhost:3000/api/auth/callback
+DISCORD_REDIRECT_URI=http://localhost:3000/api/auth/callback
 FRONTEND_REDIRECT_URL=http://localhost:3001
 BOT_TOKEN=
-SESSION_SECRET=bytebot-session-secret
+COOKIE_SECRET=<segredo-aleatorio-de-pelo-menos-32-bytes>
 BYTEBOT_API_URL=http://localhost:3001
 BYTEBOT_API_KEY=
 ```
@@ -61,13 +61,47 @@ O script do frontend fixa o Next.js na porta `3002`, evitando que ele capture as
 - `POST /api/player/skip` - pula a faixa atual no guild da sessão
 - `GET /api/player/queue` - retorna a fila atual
 
-Para confirmar a autenticação sem redirecionar para o frontend, use `format=json` no callback:
+O callback valida o cookie temporário de OAuth, grava o perfil mínimo em um cookie
+assinado e redireciona para `FRONTEND_REDIRECT_URL` (padrão `/`). Tokens de acesso
+do Discord não são armazenados nos cookies. Não há sessão em memória.
 
-```
-GET /api/auth/callback?code=CODIGO_DO_DISCORD&state=STATE_DA_SESSAO&format=json
-```
+## Vercel e cookies
 
-O callback salva a sessão e responde com `authenticated: true` e os campos `id`, `username` e `avatar`.
+Use a raiz deste repositório como Root Directory da Vercel. O `vercel.json`
+compila `api/index.js` como uma função Node.js e encaminha todas as URLs para ela.
+Esse arquivo apenas exporta o `app.js`. O build inclui `frontend/out/**`, já
+versionado neste projeto. Quando alterar o frontend, execute
+`npm --prefix frontend run build` e inclua o conteúdo atualizado de `frontend/out`
+no deploy. A configuração usa o builder explícito para servir também os arquivos
+estáticos pelo Express, sem depender da detecção automática de framework.
+
+Configure no painel da Vercel:
+
+- `COOKIE_SECRET`: segredo aleatório estável de pelo menos 32 bytes. Gere com
+  `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+  `SESSION_SECRET` também é aceito como fallback, com o mesmo tamanho mínimo.
+- `DISCORD_CLIENT_ID` e `DISCORD_CLIENT_SECRET`.
+- `DISCORD_REDIRECT_URI=https://SEU-DOMINIO/api/auth/callback`: cadastre exatamente
+  essa URL no Discord Developer Portal. Inicie o login pelo mesmo domínio;
+  cookies não são compartilhados entre URLs de preview e produção.
+- `FRONTEND_REDIRECT_URL=/`: mantém frontend e API na mesma origem.
+- `BYTEBOT_API_URL`: URL HTTPS acessível da bridge do bot; `localhost` na Vercel
+  não alcança o servidor RedHosting. Mantenha a chave da bridge em `BYTEBOT_API_KEY`
+  ou o fallback atual `BOT_TOKEN`.
+
+Os cookies são host-only, `HttpOnly`, `SameSite=Lax` e `Secure` em produção/Vercel.
+O state expira em 10 minutos e a autenticação em 24 horas. Assinatura e expiração
+são verificadas em cada instância, sem armazenamento em memória. O cookie de voz
+é vinculado ao usuário e a presença é revalidada no bot antes dos comandos.
+Mudar o segredo invalida os cookies existentes. Em localhost com HTTP, `Secure`
+não é imposto, para permitir desenvolvimento local.
+
+As respostas `/api/*` usam `Cache-Control: no-store`; rotas de API desconhecidas
+retornam JSON 404 antes dos arquivos estáticos e do catch-all do frontend.
+`app.listen` só executa com `node app.js` fora da Vercel.
+
+A Vercel hospeda a interface e o OAuth/HTTP. O processo Python de discord.py,
+Gateway e FFmpeg continua no servidor persistente RedHosting.
 
 ## Observações
 

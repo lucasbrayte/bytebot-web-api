@@ -1,7 +1,6 @@
 require('dotenv').config();
 
 const express = require('express');
-const session = require('express-session');
 const axios = require('axios');
 const crypto = require('crypto');
 const path = require('path');
@@ -16,25 +15,72 @@ if (missingEnv.length > 0) {
   console.warn(`Missing environment variables: ${missingEnv.join(', ')}. Copy .env.example to .env and fill them in.`);
 }
 
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || 'bytebot-session-secret',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      maxAge: 1000 * 60 * 60 * 24,
-    },
-  })
-);
-
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 
-// Serve arquivos estáticos da pasta frontend (CSS, JS, imagens)
-app.use(express.static(path.join(__dirname, 'frontend', 'out')));
+// Shared by every function instance; never generate a secret at runtime.
+const COOKIE_SECRET = process.env.COOKIE_SECRET || process.env.SESSION_SECRET;
+const AUTH_TTL = 24 * 60 * 60 * 1000;
+const STATE_TTL = 10 * 60 * 1000;
+
+function authConfigured(res) {
+  if (typeof COOKIE_SECRET !== 'string' || Buffer.byteLength(COOKIE_SECRET) < 32) {
+    res.status(503).json({ error: 'Authentication unavailable: configure COOKIE_SECRET (at least 32 bytes).' });
+    return false;
+  }
+  return true;
+}
+
+function cookieOptions(req) {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL) || req.secure,
+    sameSite: 'lax',
+    path: '/',
+  };
+}
+
+function signature(name, value) {
+  return crypto.createHmac('sha256', COOKIE_SECRET).update(`${name}.${value}`).digest('base64url');
+}
+
+function equalStrings(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function writeCookie(req, res, name, data, maxAge) {
+  const value = Buffer.from(JSON.stringify({ ...data, exp: Date.now() + maxAge })).toString('base64url');
+  res.cookie(name, `${value}.${signature(name, value)}`, { ...cookieOptions(req), maxAge });
+}
+
+function readCookie(req, name) {
+  if (!COOKIE_SECRET) return null;
+  try {
+    const values = (req.headers.cookie || '').split(';').map(part => part.trim())
+      .filter(part => part.startsWith(`${name}=`));
+    if (values.length !== 1) return null;
+    const token = decodeURIComponent(values[0].slice(name.length + 1));
+    if (token.length > 4096) return null;
+    const parts = token.split('.');
+    if (parts.length !== 2 || !equalStrings(parts[1], signature(name, parts[0]))) return null;
+    const data = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    return data && Number.isFinite(data.exp) && data.exp > Date.now() ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearCookie(req, res, name) {
+  res.clearCookie(name, cookieOptions(req));
+}
 
 // ==========================================
 // UTILS E FUNÇÕES DE APOIO
@@ -62,6 +108,7 @@ async function exchangeCodeForToken(code) {
   });
 
   const response = await axios.post('https://discord.com/api/v10/oauth2/token', params.toString(), {
+    timeout: 15000,
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
@@ -72,6 +119,7 @@ async function exchangeCodeForToken(code) {
 
 async function getDiscordUser(accessToken) {
   const response = await axios.get('https://discord.com/api/v10/users/@me', {
+    timeout: 15000,
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },
@@ -124,28 +172,29 @@ async function proxyByteBotCommand(path, method, payload = {}, timeout = 5000) {
 }
 
 function requireAuthenticatedUser(req, res) {
-  if (!req.session.user_id) {
+  if (!authConfigured(res)) return null;
+  const auth = readCookie(req, 'bytebot_auth');
+  if (!auth?.user || typeof auth.user.id !== 'string' || !/^\d+$/.test(auth.user.id)) {
     res.status(401).json({ error: 'User not authenticated.' });
     return null;
   }
-
-  return req.session.user_id;
+  req.auth = auth;
+  return auth.user.id;
 }
 
 async function requireVoiceGuild(req, res) {
-  const guildId = req.session.guild_id;
-  if (!guildId) {
+  const scope = readCookie(req, 'bytebot_voice');
+  const guildId = scope?.user_id === req.auth.user.id ? scope.guild_id : null;
+  if (typeof guildId !== 'string' || !/^\d+$/.test(guildId)) {
     res.status(409).json({ error: 'User voice channel is not available.' });
     return null;
   }
-
-  const current = await getByteBotVoiceStatus(req.session.user_id);
-  if (!current?.inVoice || String(current.guild_id) !== String(guildId)) {
-    delete req.session.guild_id;
+  const current = await getByteBotVoiceStatus(req.auth.user.id);
+  if (!current?.inVoice || String(current.guild_id) !== guildId) {
+    clearCookie(req, res, 'bytebot_voice');
     res.status(409).json({ error: 'Voice channel changed or is unavailable. Refresh your voice status.' });
     return null;
   }
-
   return guildId;
 }
 
@@ -168,44 +217,47 @@ app.get('/api/info', (req, res) => {
 });
 
 app.get('/api/auth/discord', (req, res) => {
+  if (!authConfigured(res)) return;
   const state = crypto.randomBytes(24).toString('hex');
-  req.session.oauthState = state;
+  writeCookie(req, res, 'bytebot_oauth', { state }, STATE_TTL);
 
   const authUrl = buildDiscordAuthUrl(state);
   return res.redirect(authUrl);
 });
 
 app.get('/api/auth/callback', async (req, res) => {
+  if (!authConfigured(res)) return;
   const { code, state } = req.query;
+  const saved = readCookie(req, 'bytebot_oauth');
+  clearCookie(req, res, 'bytebot_oauth');
 
-  if (!code) {
+  if (typeof code !== 'string' || !code) {
     return res.status(400).json({ error: 'Missing Discord authorization code.' });
   }
 
-  if (!state || state !== req.session.oauthState) {
+  if (!saved || !equalStrings(state, saved.state)) {
     return res.status(400).json({ error: 'Invalid OAuth state.' });
   }
-
-  delete req.session.oauthState;
 
   try {
     const tokenData = await exchangeCodeForToken(code);
     const user = await getDiscordUser(tokenData.access_token);
 
-    req.session.user_id = user.id;
-    delete req.session.guild_id;
-    req.session.user = {
+    if (typeof user.id !== 'string' || !/^\d+$/.test(user.id)) {
+      throw new Error('Discord returned an invalid user ID');
+    }
+    writeCookie(req, res, 'bytebot_auth', { user: {
       id: user.id,
       username: user.username,
       discriminator: user.discriminator,
       avatar: user.avatar,
-      email: user.email,
-    };
+    } }, AUTH_TTL);
+    clearCookie(req, res, 'bytebot_voice');
 
     const redirectUrl = process.env.FRONTEND_REDIRECT_URL || '/';
     return res.redirect(redirectUrl);
   } catch (error) {
-    console.error('Discord OAuth callback failed:', error.response?.data || error.message);
+    console.error('Discord OAuth callback failed:', error.response?.status || error.code || 'upstream error');
     return res.status(500).json({ error: 'Failed to authenticate with Discord.' });
   }
 });
@@ -218,21 +270,22 @@ app.get('/api/voice/status', async (req, res) => {
     const status = await getByteBotVoiceStatus(userId);
 
     if (!status || !status.inVoice) {
-      delete req.session.guild_id;
-      return res.json({ 
+      clearCookie(req, res, 'bytebot_voice');
+      return res.json({
         inVoice: false,
-        user: req.session.user || null 
+        user: req.auth.user
       });
     }
 
-    req.session.guild_id = String(status.guild_id);
+    writeCookie(req, res, 'bytebot_voice', { user_id: userId, guild_id: String(status.guild_id) },
+      Math.max(1, req.auth.exp - Date.now()));
 
     return res.json({
       inVoice: true,
       guild_id: status.guild_id,
       channel_id: status.channel_id,
       channel_name: status.channel_name,
-      user: req.session.user || null,
+      user: req.auth.user,
     });
   } catch (error) {
     console.error('Voice status flow failed:', error.message);
@@ -375,23 +428,19 @@ app.post('/api/player/volume', async (req, res) => {
   }
 });
 
-// ==========================================
-// ROTA CATCH-ALL DO FRONTEND (DEVE SER A ÚLTIMA!)
-// ==========================================
+// API misses must never return the frontend, including non-GET requests.
+app.use('/api', (req, res) => res.status(404).json({ error: 'API route not found' }));
+app.use(express.static(path.join(__dirname, 'frontend', 'out')));
+
+// Keep the frontend catch-all as the last route.
 app.get('*', (req, res) => {
-  if (req.path.startsWith('/api')) {
-    return res.status(404).json({ error: 'API route not found' });
-  }
   res.sendFile(path.join(__dirname, 'frontend', 'out', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`ByteBot Web API running on http://localhost:${PORT}`);
-});
+if (require.main === module && !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`ByteBot Web API running on http://localhost:${PORT}`);
+  });
+}
 
-app.listen(PORT, () => {
-  console.log(`ByteBot Web API running on http://localhost:${PORT}`);
-});
-
-// ADICIONE ESTA LINHA PARA A VERCEL:
 module.exports = app;

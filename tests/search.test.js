@@ -2,21 +2,23 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const crypto = require('node:crypto');
+const secret = 'test-only-cookie-signing-secret-0123456789';
 
 function loadRoutes(upstream, voiceStatus = { inVoice: true, guild_id: '456' }) {
   upstream.get = async () => ({ data: voiceStatus });
   const routes = new Map();
-  const app = { use() {}, get(path, handler) { routes.set(path, handler); }, post(path, handler) { routes.set(path, handler); }, listen() {} };
-  const express = Object.assign(() => app, { json() {}, urlencoded() {} });
+  const app = { set() {}, use() {}, get(path, handler) { routes.set(path, handler); }, post(path, handler) { routes.set(path, handler); }, listen() {} };
+  const express = Object.assign(() => app, { json() {}, urlencoded() {}, static() {} });
   vm.runInNewContext(fs.readFileSync(require.resolve('../app.js'), 'utf8'), {
     require(name) {
       if (name === 'express') return express;
-      if (name === 'express-session') return () => {};
       if (name === 'dotenv') return { config() {} };
       if (name === 'axios') return upstream;
       return require(name);
     },
-    process: { env: {} }, console: { warn() {}, error() {}, log() {} }, URLSearchParams,
+    module: { exports: {} }, __dirname: require('path').resolve(__dirname, '..'), Buffer,
+    process: { env: { COOKIE_SECRET: secret } }, console: { warn() {}, error() {}, log() {} }, URLSearchParams,
   });
   return routes;
 }
@@ -24,9 +26,16 @@ function loadRoutes(upstream, voiceStatus = { inVoice: true, guild_id: '456' }) 
 function loadSearch(upstream) { return loadRoutes(upstream).get('/api/player/search'); }
 
 async function request(handler, query, session = { user_id: '123' }, body = {}) {
-  const response = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
+  const response = { cleared: [], clearCookie(name) { this.cleared.push(name); }, code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
   assert.equal(typeof handler, 'function', 'search route must exist');
-  await handler({ query, session, body }, response);
+  const cookies = [];
+  function addCookie(name, data) {
+    const value = Buffer.from(JSON.stringify({ ...data, exp: Date.now() + 60000 })).toString('base64url');
+    cookies.push(`${name}=${value}.${crypto.createHmac('sha256', secret).update(`${name}.${value}`).digest('base64url')}`);
+  }
+  if (session.user_id) addCookie('bytebot_auth', { user: { id: session.user_id } });
+  if (session.guild_id) addCookie('bytebot_voice', { user_id: session.user_id, guild_id: session.guild_id });
+  await handler({ query, body, headers: { cookie: cookies.join('; ') } }, response);
   return response;
 }
 
@@ -111,7 +120,7 @@ test('leaving voice or switching guild invalidates cached scope before commands/
       const session = { user_id: '123', guild_id: '456' };
       const response = await request(routes.get(path), {}, session, { volume: 50 });
       assert.equal(response.code, 409);
-      assert.equal(session.guild_id, undefined);
+      assert.ok(response.cleared.includes('bytebot_voice'));
     }
     assert.equal(calls, 0);
   }
